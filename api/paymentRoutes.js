@@ -382,12 +382,12 @@
 // });
 
 // module.exports = router;
-
 const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
 const path = require("path");
 const fs = require("fs");
+
 const { createOrder } = require("./utils/razorpayUtils");
 const Ticket = require("./models/Ticket");
 const Counter = require("./models/Counter");
@@ -403,74 +403,16 @@ const RZP_KEY_SECRET = process.env.TEDX_RAZORPAY_KEY_SECRET || "";
 const EVENT_ID = process.env.TEDX_EVENT_ID || "tedx-2025";
 const AUTO_SEED = String(process.env.TEDX_AUTO_SEED || "").toLowerCase() === "true";
 
-// UPDATED: Enhanced availability check with debugging and null safety
-async function checkSessionAvailability(session) {
-  const cap = await EventCapacity.findOne({ eventId: EVENT_ID }).lean();
-  
-  console.log("🔍 Checking availability:", {
-    session,
-    eventId: EVENT_ID,
-    capacityFound: !!cap,
-    totalSeats: cap?.totalSeats,
-    fullDay: cap?.fullDay,
-    morningSingles: cap?.morningSingles,
-    eveningSingles: cap?.eveningSingles,
-    version: cap?.version
-  });
-
-  if (!cap) {
-    console.log("❌ No capacity document found for eventId:", EVENT_ID);
-    return false;
-  }
-
-  // Use null coalescing to handle undefined fields gracefully
-  const morningOccupied = (cap.fullDay || 0) + (cap.morningSingles || 0);
-  const eveningOccupied = (cap.fullDay || 0) + (cap.eveningSingles || 0);
-  
-  const morningAvailable = Math.max(0, (cap.totalSeats || 0) - morningOccupied);
-  const eveningAvailable = Math.max(0, (cap.totalSeats || 0) - eveningOccupied);
-  const fullDayAvailable = Math.min(morningAvailable, eveningAvailable);
-
-  console.log("📊 Availability calculation:", {
-    totalSeats: cap.totalSeats,
-    morningOccupied,
-    eveningOccupied,
-    morningAvailable,
-    eveningAvailable,
-    fullDayAvailable
-  });
-
-  let result = false;
-  switch (session) {
-    case "morning":
-      result = morningAvailable > 0;
-      console.log(`Morning session available: ${result} (${morningAvailable} seats)`);
-      break;
-    case "evening":
-      result = eveningAvailable > 0;
-      console.log(`Evening session available: ${result} (${eveningAvailable} seats)`);
-      break;
-    case "fullDay":
-      result = fullDayAvailable > 0;
-      console.log(`Full day session available: ${result} (${fullDayAvailable} seats)`);
-      break;
-    default:
-      console.log("❌ Invalid session type:", session);
-      result = false;
-  }
-
-  return result;
-}
-
 // GET /api/payment/availability
 router.get("/availability", async (req, res) => {
   try {
     const cap = await EventCapacity.findOne({ eventId: EVENT_ID }).lean();
     if (!cap) {
-      console.log("⚠️ No capacity document found in availability endpoint");
       return res.status(200).json({
         eventId: EVENT_ID,
         totalSeats: 0,
+        totalUnits: 0,
+        usedUnits: 0,
         fullDay: 0,
         morningSingles: 0,
         eveningSingles: 0,
@@ -480,69 +422,36 @@ router.get("/availability", async (req, res) => {
         status: "missing",
       });
     }
-
-    // Calculate based on session occupancy with null safety
-    const morningOccupied = (cap.fullDay || 0) + (cap.morningSingles || 0);
-    const eveningOccupied = (cap.fullDay || 0) + (cap.eveningSingles || 0);
-    
-    const morningAvailable = Math.max(0, (cap.totalSeats || 0) - morningOccupied);
-    const eveningAvailable = Math.max(0, (cap.totalSeats || 0) - eveningOccupied);
+    const morningAvailable = Math.max(0, cap.totalSeats - (cap.fullDay + cap.morningSingles));
+    const eveningAvailable = Math.max(0, cap.totalSeats - (cap.fullDay + cap.eveningSingles));
     const fullDayAvailable = Math.min(morningAvailable, eveningAvailable);
-
     return res.status(200).json({
       eventId: EVENT_ID,
-      totalSeats: cap.totalSeats || 0,
-      version: cap.version || 0,
-      fullDay: cap.fullDay || 0,
-      morningSingles: cap.morningSingles || 0,
-      eveningSingles: cap.eveningSingles || 0,
-      morningOccupied,
-      eveningOccupied,
+      totalSeats: cap.totalSeats,
+      totalUnits: cap.totalUnits,
+      usedUnits: cap.usedUnits,
+      fullDay: cap.fullDay,
+      morningSingles: cap.morningSingles,
+      eveningSingles: cap.eveningSingles,
       morningAvailable,
       eveningAvailable,
       fullDayAvailable,
-      status: (morningAvailable > 0 || eveningAvailable > 0) ? "available" : "soldout",
+      status: (morningAvailable > 0 || eveningAvailable > 0 || fullDayAvailable > 0) ? "available" : "soldout",
     });
   } catch (e) {
-    console.error("Availability check error:", e?.message || e);
     return res.status(500).json({ error: e?.message || "availability failed" });
   }
 });
 
-// POST /api/payment/create-order - ENHANCED: Better availability check and error messages
+// POST /api/payment/create-order
 router.post("/create-order", async (req, res) => {
   try {
-    const { amount, session } = req.body;
+    const { amount } = req.body;
     const num = Number(amount);
-    
-    console.log("🎫 Create order request:", { amount, session, eventId: EVENT_ID });
-    
     if (!Number.isFinite(num) || num <= 0) {
-      console.log("❌ Invalid amount:", amount);
       return res.status(400).json({ error: "Valid amount is required" });
     }
-    
-    if (!session || !["morning", "evening", "fullDay"].includes(session)) {
-      console.log("❌ Invalid session:", session);
-      return res.status(400).json({ error: "Valid session type is required" });
-    }
-
-    // CRITICAL: Check availability before creating Razorpay order
-    console.log("🔄 Checking seat availability before creating order...");
-    const isAvailable = await checkSessionAvailability(session);
-    
-    if (!isAvailable) {
-      console.log("🚫 BLOCKING PAYMENT: No seats available for", session);
-      return res.status(409).json({ 
-        error: "Seats are full", 
-        message: `All seats are sold out for the ${session} session. Please try a different session.` 
-      });
-    }
-
-    console.log("✅ Seats available, creating Razorpay order...");
-    // Create order only if seats are available
     const order = await createOrder(num);
-    console.log("✅ Razorpay order created:", order.id);
     return res.json(order);
   } catch (err) {
     console.error("Error creating order:", err?.message || err);
@@ -560,7 +469,7 @@ async function getNextSequenceValue(sequenceName, session = null) {
   return counter.sequence_value;
 }
 
-// POST /api/payment/verify - UPDATED: Use reserveSeat method with optimistic concurrency control
+// POST /api/payment/verify
 router.post("/verify", async (req, res) => {
   try {
     const {
@@ -576,17 +485,13 @@ router.post("/verify", async (req, res) => {
       amount,
     } = req.body;
 
-    console.log("💳 Payment verification started:", { razorpay_payment_id, session, amount });
-
     // Validate required fields
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !name || !email || !phone || !session || amount == null) {
       return res.status(400).json({ success: false, message: "Missing required fields" });
     }
-
     if (!["morning", "evening", "fullDay"].includes(session)) {
       return res.status(400).json({ success: false, message: "Invalid session type" });
     }
-
     if (!RZP_KEY_SECRET) {
       return res.status(500).json({ success: false, message: "Payment secret not configured" });
     }
@@ -602,7 +507,6 @@ router.post("/verify", async (req, res) => {
     // Idempotency check
     const existing = await Ticket.findOne({ razorpayPaymentId: razorpay_payment_id }).lean();
     if (existing) {
-      console.log("♻️ Payment already processed:", existing.ticketId);
       return res.json({
         success: true,
         message: "Payment already processed",
@@ -614,59 +518,82 @@ router.post("/verify", async (req, res) => {
     // Ensure capacity document exists (dev mode)
     const snap = await EventCapacity.findOne({ eventId: EVENT_ID }).lean();
     if (!snap && AUTO_SEED) {
-      console.log("🌱 Auto-seeding capacity document...");
       await EventCapacity.create({
         eventId: EVENT_ID,
-        totalSeats: 6,
+        totalSeats: 400,
+        totalUnits: 800,
+        usedUnits: 0,
         fullDay: 0,
         morningSingles: 0,
         eveningSingles: 0,
-        version: 0,
       });
-      console.log("✅ Dev auto-seeded capacity for", EVENT_ID);
+      console.log("Dev auto-seeded capacity for", EVENT_ID);
     }
 
-    // UPDATED: Reserve capacity and create ticket using the new reserveSeat method
+    // Reserve capacity and create ticket in transaction
     let ticketDoc;
     await withTransaction(async (txn) => {
-      try {
-        console.log("🔒 Starting transaction for seat reservation...");
-        // Use the new reserveSeat method with optimistic concurrency control
-        const updatedCap = await EventCapacity.reserveSeat(EVENT_ID, session, txn);
-        console.log(`✅ Reserved seat for ${session}. New capacity:`, {
-          fullDay: updatedCap.fullDay,
-          morningSingles: updatedCap.morningSingles,
-          eveningSingles: updatedCap.eveningSingles,
-          version: updatedCap.version
-        });
-
-        const seq = await getNextSequenceValue("ticketId", txn);
-        const humanCode = `TEDX-${String(seq).padStart(5, "0")}`;
-
-        ticketDoc = await Ticket.create([{
-          ticketId: humanCode,
-          razorpayOrderId: razorpay_order_id,
-          razorpayPaymentId: razorpay_payment_id,
-          razorpaySignature: razorpay_signature,
-          name,
-          email: email?.toLowerCase(),
-          phone,
-          department: department || "",
-          branch: branch || "",
-          session,
-          amount: Number(amount),
-        }], { session: txn });
-
-        ticketDoc = ticketDoc[0]; // Extract from array when using session
-        console.log("🎫 Ticket created successfully:", humanCode);
-        
-      } catch (error) {
-        console.error(`❌ Reservation failed for ${session}:`, error.message);
-        if (error.message === 'SOLD_OUT' || error.message === 'EVENT_NOT_FOUND') {
-          throw new Error("SOLD_OUT");
-        }
-        throw error; // Re-throw other errors
+      let filter, inc;
+      if (session === "fullDay") {
+        filter = {
+          eventId: EVENT_ID,
+          $expr: {
+            $and: [
+              { $lte: ["$usedUnits", { $subtract: ["$totalUnits", 2] }] },
+              { $lt: ["$fullDay", "$totalSeats"] },
+              { $lt: [{ $add: ["$fullDay", "$morningSingles"] }, "$totalSeats"] },
+              { $lt: [{ $add: ["$fullDay", "$eveningSingles"] }, "$totalSeats"] },
+            ],
+          },
+        };
+        inc = { usedUnits: 2, fullDay: 1 };
+      } else if (session === "morning") {
+        filter = {
+          eventId: EVENT_ID,
+          $expr: {
+            $and: [
+              { $lte: ["$usedUnits", { $subtract: ["$totalUnits", 1] }] },
+              { $lt: [{ $add: ["$fullDay", "$morningSingles"] }, "$totalSeats"] },
+            ],
+          },
+        };
+        inc = { usedUnits: 1, morningSingles: 1 };
+      } else {
+        filter = {
+          eventId: EVENT_ID,
+          $expr: {
+            $and: [
+              { $lte: ["$usedUnits", { $subtract: ["$totalUnits", 1] }] },
+              { $lt: [{ $add: ["$fullDay", "$eveningSingles"] }, "$totalSeats"] },
+            ],
+          },
+        };
+        inc = { usedUnits: 1, eveningSingles: 1 };
       }
+
+      const cap = await EventCapacity.findOneAndUpdate(
+        filter,
+        { $inc: inc },
+        { new: true, session: txn || undefined }
+      );
+      if (!cap) throw new Error("SOLD_OUT");
+
+      const seq = await getNextSequenceValue("ticketId", txn || null);
+      const humanCode = `TEDX-${String(seq).padStart(5, "0")}`;
+
+      ticketDoc = await Ticket.create({
+        ticketId: humanCode,
+        razorpayOrderId: razorpay_order_id,
+        razorpayPaymentId: razorpay_payment_id,
+        razorpaySignature: razorpay_signature,
+        name,
+        email: email?.toLowerCase(),
+        phone,
+        department: department || "",
+        branch: branch || "",
+        session,
+        amount: Number(amount),
+      });
     });
 
     // Log to Google Sheets (best effort)
@@ -686,35 +613,33 @@ router.post("/verify", async (req, res) => {
         t.ticketId,
         createdAtISO,
       ]);
-      console.log("📊 Logged to Google Sheets successfully");
     } catch (e) {
-      console.warn("⚠️ Sheets append failed (non-fatal):", e?.message || e);
+      console.warn("Sheets append failed (non-fatal):", e?.message || e);
     }
 
-    // Success response
+    // Success response - SuccessPage will handle email sending
     return res.json({
       success: true,
       message: "Payment verified; ticket will be emailed from success page",
       ticketId: ticketDoc.ticketId,
       session,
-      razorpayPaymentId: razorpay_payment_id,
+      razorpayPaymentId: razorpay_payment_id, // CRITICAL: Include this for SuccessPage
     });
   } catch (err) {
     if (err && err.message === "SOLD_OUT") {
-      console.log("🚫 Transaction failed - seats full during payment verification");
-      return res.status(409).json({ success: false, message: "Seats are full for this session" });
+      return res.status(409).json({ success: false, message: "Sold out" });
     }
     if (err?.code === 11000 && err?.keyPattern?.razorpayPaymentId) {
       const dup = await Ticket.findOne({ razorpayPaymentId: req.body.razorpay_payment_id }).lean();
       return res.json({ success: true, message: "Payment already processed", ticketId: dup?.ticketId, session: dup?.session });
     }
-    console.error("❌ Error verifying payment:", err?.message || err);
+    console.error("Error verifying payment:", err?.message || err);
     if (err?.stack) console.error(err.stack);
     return res.status(500).json({ success: false, message: "Failed to verify payment" });
   }
 });
 
-// POST /api/payment/send-ticket - Send client-generated ticket via email with Payment ID
+// POST /api/payment/send-ticket - FIXED: Send client-generated ticket via email with Payment ID
 router.post("/send-ticket", async (req, res) => {
   try {
     const { 
@@ -723,16 +648,17 @@ router.post("/send-ticket", async (req, res) => {
       session, 
       amount, 
       ticketId, 
-      razorpayPaymentId,
+      razorpayPaymentId,  // CRITICAL: Extract this from request body
       pdfBase64,     
       useClientPdf,  
       ticketImage    
     } = req.body;
 
+    // ENHANCED DEBUG: Include razorpayPaymentId in logs
     console.log("📧 /send-ticket called with:", {
       email,
       ticketId,
-      razorpayPaymentId,
+      razorpayPaymentId,  // ADDED: This will show if Payment ID is received
       useClientPdf,
       hasPdfBase64: !!pdfBase64,
       hasTicketImage: !!ticketImage
@@ -756,13 +682,14 @@ router.post("/send-ticket", async (req, res) => {
 
     console.log("📧 Sending CLIENT-generated ticket via email");
 
+    // CRITICAL FIX: Pass razorpayPaymentId to email function
     await sendTicketEmail({
       email,
       name: name || "Guest",
       session: session || "—",
       amount,
       ticketId,
-      razorpayPaymentId: razorpayPaymentId || "—",
+      razorpayPaymentId: razorpayPaymentId || "—", // FIXED: Now passes Payment ID
       ticketImage
     });
 
@@ -811,7 +738,7 @@ router.get("/tickets/:ticketId", async (req, res) => {
       email: ticket.email,
       phone: ticket.phone,
       amount: ticket.amount,
-      razorpayPaymentId: ticket.razorpayPaymentId,
+      razorpayPaymentId: ticket.razorpayPaymentId, // ADDED: Include Payment ID in response
     });
   } catch (err) {
     console.error("Error fetching ticket:", err);
@@ -820,4 +747,3 @@ router.get("/tickets/:ticketId", async (req, res) => {
 });
 
 module.exports = router;
-
