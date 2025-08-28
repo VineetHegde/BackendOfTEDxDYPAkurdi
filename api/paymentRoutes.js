@@ -501,8 +501,8 @@ router.post("/verify", async (req, res) => {
     if (!snap && AUTO_SEED) {
       await EventCapacity.create({
         eventId: EVENT_ID,
-        totalSeats: 400,
-        totalUnits: 800,
+        totalSeats: 4,
+        totalUnits: 8,
         usedUnits: 0,
         fullDay: 0,
         morningSingles: 0,
