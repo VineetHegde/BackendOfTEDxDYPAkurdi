@@ -368,7 +368,6 @@ const router = express.Router();
 const crypto = require("crypto");
 const path = require("path");
 const fs = require("fs");
-
 const { createOrder } = require("./utils/razorpayUtils");
 const Ticket = require("./models/Ticket");
 const Counter = require("./models/Counter");
@@ -384,6 +383,30 @@ const RZP_KEY_SECRET = process.env.TEDX_RAZORPAY_KEY_SECRET || "";
 const EVENT_ID = process.env.TEDX_EVENT_ID || "tedx-2025";
 const AUTO_SEED = String(process.env.TEDX_AUTO_SEED || "").toLowerCase() === "true";
 
+// Helper function to check availability for a specific session
+async function checkSessionAvailability(session) {
+  const cap = await EventCapacity.findOne({ eventId: EVENT_ID }).lean();
+  if (!cap) return false;
+
+  const morningOccupied = cap.fullDay + cap.morningSingles;
+  const eveningOccupied = cap.fullDay + cap.eveningSingles;
+  
+  const morningAvailable = Math.max(0, cap.totalSeats - morningOccupied);
+  const eveningAvailable = Math.max(0, cap.totalSeats - eveningOccupied);
+  const fullDayAvailable = Math.min(morningAvailable, eveningAvailable);
+
+  switch (session) {
+    case "morning":
+      return morningAvailable > 0;
+    case "evening":
+      return eveningAvailable > 0;
+    case "fullDay":
+      return fullDayAvailable > 0;
+    default:
+      return false;
+  }
+}
+
 // GET /api/payment/availability
 router.get("/availability", async (req, res) => {
   try {
@@ -392,8 +415,6 @@ router.get("/availability", async (req, res) => {
       return res.status(200).json({
         eventId: EVENT_ID,
         totalSeats: 0,
-        totalUnits: 0,
-        usedUnits: 0,
         fullDay: 0,
         morningSingles: 0,
         eveningSingles: 0,
@@ -403,35 +424,57 @@ router.get("/availability", async (req, res) => {
         status: "missing",
       });
     }
-    const morningAvailable = Math.max(0, cap.totalSeats - (cap.fullDay + cap.morningSingles));
-    const eveningAvailable = Math.max(0, cap.totalSeats - (cap.fullDay + cap.eveningSingles));
+
+    // FIXED LOGIC: Calculate based on session occupancy
+    const morningOccupied = cap.fullDay + cap.morningSingles;
+    const eveningOccupied = cap.fullDay + cap.eveningSingles;
+    
+    const morningAvailable = Math.max(0, cap.totalSeats - morningOccupied);
+    const eveningAvailable = Math.max(0, cap.totalSeats - eveningOccupied);
     const fullDayAvailable = Math.min(morningAvailable, eveningAvailable);
+
     return res.status(200).json({
       eventId: EVENT_ID,
       totalSeats: cap.totalSeats,
-      totalUnits: cap.totalUnits,
-      usedUnits: cap.usedUnits,
       fullDay: cap.fullDay,
       morningSingles: cap.morningSingles,
       eveningSingles: cap.eveningSingles,
+      morningOccupied,
+      eveningOccupied,
       morningAvailable,
       eveningAvailable,
       fullDayAvailable,
-      status: (morningAvailable > 0 || eveningAvailable > 0 || fullDayAvailable > 0) ? "available" : "soldout",
+      status: (morningAvailable > 0 || eveningAvailable > 0) ? "available" : "soldout",
     });
   } catch (e) {
     return res.status(500).json({ error: e?.message || "availability failed" });
   }
 });
 
-// POST /api/payment/create-order
+// POST /api/payment/create-order - UPDATED: Check availability before creating order
 router.post("/create-order", async (req, res) => {
   try {
-    const { amount } = req.body;
+    const { amount, session } = req.body;
     const num = Number(amount);
+    
     if (!Number.isFinite(num) || num <= 0) {
       return res.status(400).json({ error: "Valid amount is required" });
     }
+
+    if (!session || !["morning", "evening", "fullDay"].includes(session)) {
+      return res.status(400).json({ error: "Valid session type is required" });
+    }
+
+    // CRITICAL: Check availability before creating Razorpay order
+    const isAvailable = await checkSessionAvailability(session);
+    if (!isAvailable) {
+      return res.status(409).json({ 
+        error: "Seats are full", 
+        message: `No seats available for ${session} session` 
+      });
+    }
+
+    // Create order only if seats are available
     const order = await createOrder(num);
     return res.json(order);
   } catch (err) {
@@ -450,7 +493,7 @@ async function getNextSequenceValue(sequenceName, session = null) {
   return counter.sequence_value;
 }
 
-// POST /api/payment/verify
+// POST /api/payment/verify - UPDATED: Simplified logic without usedUnits
 router.post("/verify", async (req, res) => {
   try {
     const {
@@ -470,9 +513,11 @@ router.post("/verify", async (req, res) => {
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !name || !email || !phone || !session || amount == null) {
       return res.status(400).json({ success: false, message: "Missing required fields" });
     }
+
     if (!["morning", "evening", "fullDay"].includes(session)) {
       return res.status(400).json({ success: false, message: "Invalid session type" });
     }
+
     if (!RZP_KEY_SECRET) {
       return res.status(500).json({ success: false, message: "Payment secret not configured" });
     }
@@ -501,9 +546,7 @@ router.post("/verify", async (req, res) => {
     if (!snap && AUTO_SEED) {
       await EventCapacity.create({
         eventId: EVENT_ID,
-        totalSeats: 4,
-        totalUnits: 8,
-        usedUnits: 0,
+        totalSeats: 6, // Updated from 3 to match your requirement
         fullDay: 0,
         morningSingles: 0,
         eveningSingles: 0,
@@ -515,41 +558,37 @@ router.post("/verify", async (req, res) => {
     let ticketDoc;
     await withTransaction(async (txn) => {
       let filter, inc;
+      
       if (session === "fullDay") {
+        // Full day needs both morning and evening slots available
         filter = {
           eventId: EVENT_ID,
           $expr: {
             $and: [
-              { $lte: ["$usedUnits", { $subtract: ["$totalUnits", 2] }] },
-              { $lt: ["$fullDay", "$totalSeats"] },
+              // Check morning availability
               { $lt: [{ $add: ["$fullDay", "$morningSingles"] }, "$totalSeats"] },
-              { $lt: [{ $add: ["$fullDay", "$eveningSingles"] }, "$totalSeats"] },
-            ],
-          },
+              // Check evening availability  
+              { $lt: [{ $add: ["$fullDay", "$eveningSingles"] }, "$totalSeats"] }
+            ]
+          }
         };
-        inc = { usedUnits: 2, fullDay: 1 };
+        inc = { fullDay: 1 };
       } else if (session === "morning") {
         filter = {
           eventId: EVENT_ID,
           $expr: {
-            $and: [
-              { $lte: ["$usedUnits", { $subtract: ["$totalUnits", 1] }] },
-              { $lt: [{ $add: ["$fullDay", "$morningSingles"] }, "$totalSeats"] },
-            ],
-          },
+            $lt: [{ $add: ["$fullDay", "$morningSingles"] }, "$totalSeats"]
+          }
         };
-        inc = { usedUnits: 1, morningSingles: 1 };
-      } else {
+        inc = { morningSingles: 1 };
+      } else { // evening
         filter = {
           eventId: EVENT_ID,
           $expr: {
-            $and: [
-              { $lte: ["$usedUnits", { $subtract: ["$totalUnits", 1] }] },
-              { $lt: [{ $add: ["$fullDay", "$eveningSingles"] }, "$totalSeats"] },
-            ],
-          },
+            $lt: [{ $add: ["$fullDay", "$eveningSingles"] }, "$totalSeats"]
+          }
         };
-        inc = { usedUnits: 1, eveningSingles: 1 };
+        inc = { eveningSingles: 1 };
       }
 
       const cap = await EventCapacity.findOneAndUpdate(
@@ -557,12 +596,13 @@ router.post("/verify", async (req, res) => {
         { $inc: inc },
         { new: true, session: txn || undefined }
       );
+
       if (!cap) throw new Error("SOLD_OUT");
 
       const seq = await getNextSequenceValue("ticketId", txn || null);
       const humanCode = `TEDX-${String(seq).padStart(5, "0")}`;
 
-      ticketDoc = await Ticket.create({
+      ticketDoc = await Ticket.create([{
         ticketId: humanCode,
         razorpayOrderId: razorpay_order_id,
         razorpayPaymentId: razorpay_payment_id,
@@ -574,7 +614,9 @@ router.post("/verify", async (req, res) => {
         branch: branch || "",
         session,
         amount: Number(amount),
-      });
+      }], { session: txn || undefined });
+
+      ticketDoc = ticketDoc[0]; // Extract from array when using session
     });
 
     // Log to Google Sheets (best effort)
@@ -608,7 +650,7 @@ router.post("/verify", async (req, res) => {
     });
   } catch (err) {
     if (err && err.message === "SOLD_OUT") {
-      return res.status(409).json({ success: false, message: "Sold out" });
+      return res.status(409).json({ success: false, message: "Seats are full for this session" });
     }
     if (err?.code === 11000 && err?.keyPattern?.razorpayPaymentId) {
       const dup = await Ticket.findOne({ razorpayPaymentId: req.body.razorpay_payment_id }).lean();
@@ -620,7 +662,7 @@ router.post("/verify", async (req, res) => {
   }
 });
 
-// POST /api/payment/send-ticket - FIXED: Send client-generated ticket via email with Payment ID
+// POST /api/payment/send-ticket - Send client-generated ticket via email with Payment ID
 router.post("/send-ticket", async (req, res) => {
   try {
     const { 
@@ -629,17 +671,16 @@ router.post("/send-ticket", async (req, res) => {
       session, 
       amount, 
       ticketId, 
-      razorpayPaymentId,  // CRITICAL: Extract this from request body
+      razorpayPaymentId,
       pdfBase64,     
       useClientPdf,  
       ticketImage    
     } = req.body;
 
-    // ENHANCED DEBUG: Include razorpayPaymentId in logs
     console.log("📧 /send-ticket called with:", {
       email,
       ticketId,
-      razorpayPaymentId,  // ADDED: This will show if Payment ID is received
+      razorpayPaymentId,
       useClientPdf,
       hasPdfBase64: !!pdfBase64,
       hasTicketImage: !!ticketImage
@@ -663,14 +704,13 @@ router.post("/send-ticket", async (req, res) => {
 
     console.log("📧 Sending CLIENT-generated ticket via email");
 
-    // CRITICAL FIX: Pass razorpayPaymentId to email function
     await sendTicketEmail({
       email,
       name: name || "Guest",
       session: session || "—",
       amount,
       ticketId,
-      razorpayPaymentId: razorpayPaymentId || "—", // FIXED: Now passes Payment ID
+      razorpayPaymentId: razorpayPaymentId || "—",
       ticketImage
     });
 
@@ -719,7 +759,7 @@ router.get("/tickets/:ticketId", async (req, res) => {
       email: ticket.email,
       phone: ticket.phone,
       amount: ticket.amount,
-      razorpayPaymentId: ticket.razorpayPaymentId, // ADDED: Include Payment ID in response
+      razorpayPaymentId: ticket.razorpayPaymentId,
     });
   } catch (err) {
     console.error("Error fetching ticket:", err);
