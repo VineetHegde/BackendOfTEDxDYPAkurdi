@@ -488,6 +488,7 @@
 
 // module.exports = router;
 
+
 const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
@@ -508,14 +509,14 @@ const RZP_KEY_SECRET = process.env.TEDX_RAZORPAY_KEY_SECRET || "";
 const EVENT_ID = process.env.TEDX_EVENT_ID || "tedx-2025";
 const AUTO_SEED = String(process.env.TEDX_AUTO_SEED || "").toLowerCase() === "true";
 
-// FIXED: Initialize capacity document with 400 seats (not 6)
+// UPDATED: Initialize capacity document with 400 seats
 const initializeCapacity = async () => {
   try {
     const existing = await EventCapacity.findOne({ eventId: EVENT_ID });
     if (!existing) {
       await EventCapacity.create({
         eventId: EVENT_ID,
-        totalSeats: 400, // FIXED: Changed from 6 to 400
+        totalSeats: 6, // CHANGED: Increased from 6 to 400
         fullDay: 0,
         morningSingles: 0,
         eveningSingles: 0,
@@ -533,9 +534,10 @@ const initializeCapacity = async () => {
 // Initialize capacity on startup
 initializeCapacity();
 
-// Enhanced availability check with debugging and null safety
+// UPDATED: Enhanced availability check with debugging and null safety
 async function checkSessionAvailability(session) {
   const cap = await EventCapacity.findOne({ eventId: EVENT_ID }).lean();
+  
   console.log("🔍 Checking availability:", {
     session,
     eventId: EVENT_ID,
@@ -555,6 +557,7 @@ async function checkSessionAvailability(session) {
   // Use null coalescing to handle undefined fields gracefully
   const morningOccupied = (cap.fullDay || 0) + (cap.morningSingles || 0);
   const eveningOccupied = (cap.fullDay || 0) + (cap.eveningSingles || 0);
+  
   const morningAvailable = Math.max(0, (cap.totalSeats || 0) - morningOccupied);
   const eveningAvailable = Math.max(0, (cap.totalSeats || 0) - eveningOccupied);
   const fullDayAvailable = Math.min(morningAvailable, eveningAvailable);
@@ -586,6 +589,7 @@ async function checkSessionAvailability(session) {
       console.log("❌ Invalid session type:", session);
       result = false;
   }
+
   return result;
 }
 
@@ -636,13 +640,13 @@ router.get("/availability", async (req, res) => {
   }
 });
 
-// POST /api/payment/create-order - ENHANCED: Better error handling for live keys
+// POST /api/payment/create-order - ENHANCED: Better availability check and error messages
 router.post("/create-order", async (req, res) => {
   try {
-    const { amount, session, email, name } = req.body; // ADDED: email and name for better order tracking
+    const { amount, session } = req.body;
     const num = Number(amount);
     
-    console.log("🎫 Create order request:", { amount, session, eventId: EVENT_ID, email, name });
+    console.log("🎫 Create order request:", { amount, session, eventId: EVENT_ID });
     
     if (!Number.isFinite(num) || num <= 0) {
       console.log("❌ Invalid amount:", amount);
@@ -667,54 +671,13 @@ router.post("/create-order", async (req, res) => {
     }
 
     console.log("✅ Seats available, creating Razorpay order...");
-    
-    // ENHANCED: Create order with metadata for better tracking
-    const order = await createOrder(num, {
-      session,
-      email,
-      receiptHint: session,
-      ticketIntent: `${session}_ticket`
-    });
-    
+    // Create order only if seats are available
+    const order = await createOrder(num);
     console.log("✅ Razorpay order created:", order.id);
-    
-    // CRITICAL: Return complete order details with order_id for frontend
-    return res.json({
-      id: order.id,           // REQUIRED for frontend
-      order_id: order.id,     // ALIAS for compatibility
-      amount: order.amount,
-      currency: order.currency,
-      receipt: order.receipt,
-      status: order.status,
-      created_at: order.created_at,
-      // Additional metadata for debugging
-      session,
-      eventId: EVENT_ID
-    });
-    
+    return res.json(order);
   } catch (err) {
     console.error("Error creating order:", err?.message || err);
-    
-    // ENHANCED: Better error handling for live mode authentication issues
-    if (err?.message?.includes('authentication') || err?.message?.includes('Unauthorized')) {
-      console.error("🚨 RAZORPAY AUTHENTICATION FAILED - Check live keys!");
-      return res.status(401).json({ 
-        error: "Payment gateway authentication failed",
-        details: "Invalid Razorpay credentials. Please check your live keys."
-      });
-    }
-    
-    if (err?.message?.includes('invalid request') || err?.status === 400) {
-      return res.status(400).json({ 
-        error: "Invalid payment request",
-        details: err?.message || "Request validation failed"
-      });
-    }
-    
-    return res.status(500).json({ 
-      error: "Failed to create order",
-      details: err?.message || "Unknown error"
-    });
+    return res.status(500).json({ error: "Failed to create order" });
   }
 });
 
@@ -728,7 +691,7 @@ async function getNextSequenceValue(sequenceName, session = null) {
   return counter.sequence_value;
 }
 
-// POST /api/payment/verify - FIXED: Proper capacity initialization
+// POST /api/payment/verify - UPDATED: Initialize with 400 seats if missing
 router.post("/verify", async (req, res) => {
   try {
     const {
@@ -740,20 +703,14 @@ router.post("/verify", async (req, res) => {
       phone,
       department,
       branch,
-      session,
+      session, // 'morning' | 'evening' | 'fullDay'
       amount,
     } = req.body;
 
-    console.log("💳 Payment verification started:", { 
-      razorpay_payment_id, 
-      razorpay_order_id, 
-      session, 
-      amount 
-    });
+    console.log("💳 Payment verification started:", { razorpay_payment_id, session, amount });
 
     // Validate required fields
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !name || !email || !phone || !session || amount == null) {
-      console.log("❌ Missing required fields in verify request");
       return res.status(400).json({ success: false, message: "Missing required fields" });
     }
 
@@ -762,24 +719,16 @@ router.post("/verify", async (req, res) => {
     }
 
     if (!RZP_KEY_SECRET) {
-      console.error("🚨 RAZORPAY SECRET KEY MISSING!");
       return res.status(500).json({ success: false, message: "Payment secret not configured" });
     }
 
-    // ENHANCED: Signature verification with detailed logging
-    console.log("🔐 Verifying payment signature...");
+    // Signature verification
     const expected = crypto.createHmac("sha256", RZP_KEY_SECRET)
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest("hex");
-    
     if (expected !== razorpay_signature) {
-      console.error("❌ Payment signature verification failed!");
-      console.error("Expected:", expected);
-      console.error("Received:", razorpay_signature);
       return res.status(400).json({ success: false, message: "Invalid payment signature" });
     }
-    
-    console.log("✅ Payment signature verified successfully");
 
     // Idempotency check
     const existing = await Ticket.findOne({ razorpayPaymentId: razorpay_payment_id }).lean();
@@ -790,18 +739,17 @@ router.post("/verify", async (req, res) => {
         message: "Payment already processed",
         ticketId: existing.ticketId,
         session: existing.session,
-        razorpayPaymentId: razorpay_payment_id,
       });
     }
 
-    // FIXED: Always ensure capacity document exists with 400 seats (not 6)
+    // UPDATED: Always ensure capacity document exists with 400 seats
     let snap = await EventCapacity.findOne({ eventId: EVENT_ID }).lean();
     if (!snap) {
       console.log("🌱 Capacity document missing! Creating new one...");
       try {
         await EventCapacity.create({
           eventId: EVENT_ID,
-          totalSeats: 400, // FIXED: Changed from 6 to 400
+          totalSeats: 6, // CHANGED: Increased from 6 to 400
           fullDay: 0,
           morningSingles: 0,
           eveningSingles: 0,
@@ -832,49 +780,8 @@ router.post("/verify", async (req, res) => {
       try {
         console.log("🔒 Starting transaction for seat reservation...");
         
-        // ENHANCED: Better seat reservation logic
-        let filter, inc;
-        if (session === "fullDay") {
-          filter = {
-            eventId: EVENT_ID,
-            $expr: {
-              $and: [
-                { $lt: ["$fullDay", "$totalSeats"] },
-                { $lt: [{ $add: ["$fullDay", "$morningSingles"] }, "$totalSeats"] },
-                { $lt: [{ $add: ["$fullDay", "$eveningSingles"] }, "$totalSeats"] },
-              ],
-            },
-          };
-          inc = { fullDay: 1 };
-        } else if (session === "morning") {
-          filter = {
-            eventId: EVENT_ID,
-            $expr: {
-              $lt: [{ $add: ["$fullDay", "$morningSingles"] }, "$totalSeats"]
-            },
-          };
-          inc = { morningSingles: 1 };
-        } else {
-          filter = {
-            eventId: EVENT_ID,
-            $expr: {
-              $lt: [{ $add: ["$fullDay", "$eveningSingles"] }, "$totalSeats"]
-            },
-          };
-          inc = { eveningSingles: 1 };
-        }
-
-        const updatedCap = await EventCapacity.findOneAndUpdate(
-          filter,
-          { $inc: inc },
-          { new: true, session: txn }
-        );
-
-        if (!updatedCap) {
-          console.error(`❌ Failed to reserve seat for ${session} - SOLD OUT`);
-          throw new Error("SOLD_OUT");
-        }
-
+        // Use the reserveSeat method with optimistic concurrency control
+        const updatedCap = await EventCapacity.reserveSeat(EVENT_ID, session, txn);
         console.log(`✅ Reserved seat for ${session}. New capacity:`, {
           fullDay: updatedCap.fullDay,
           morningSingles: updatedCap.morningSingles,
@@ -907,6 +814,10 @@ router.post("/verify", async (req, res) => {
         if (error.message === 'SOLD_OUT') {
           throw new Error("SOLD_OUT");
         }
+        if (error.message === 'EVENT_NOT_FOUND') {
+          console.error("❌ EventCapacity document missing during transaction");
+          throw new Error("SYSTEM_ERROR");
+        }
         throw error; // Re-throw other errors
       }
     });
@@ -915,7 +826,6 @@ router.post("/verify", async (req, res) => {
     try {
       const t = (typeof ticketDoc?.toObject === "function" ? ticketDoc.toObject() : ticketDoc) || {};
       const createdAtISO = (t.createdAt ? new Date(t.createdAt) : new Date()).toISOString();
-      
       await appendRowToSheet([
         t.name || name,
         (t.email || email || "").toLowerCase(),
@@ -942,25 +852,26 @@ router.post("/verify", async (req, res) => {
       session,
       razorpayPaymentId: razorpay_payment_id,
     });
-
   } catch (err) {
     if (err && err.message === "SOLD_OUT") {
       console.log("🚫 Transaction failed - seats full during payment verification");
       return res.status(409).json({ success: false, message: "Seats are full for this session" });
     }
-    
+    if (err && err.message === "SYSTEM_ERROR") {
+      console.log("🚫 Transaction failed - system initialization error");
+      return res.status(500).json({ success: false, message: "System error. Please contact support." });
+    }
     if (err?.code === 11000 && err?.keyPattern?.razorpayPaymentId) {
       const dup = await Ticket.findOne({ razorpayPaymentId: req.body.razorpay_payment_id }).lean();
       return res.json({ success: true, message: "Payment already processed", ticketId: dup?.ticketId, session: dup?.session });
     }
-    
     console.error("❌ Error verifying payment:", err?.message || err);
     if (err?.stack) console.error(err.stack);
     return res.status(500).json({ success: false, message: "Failed to verify payment" });
   }
 });
 
-// POST /api/payment/send-ticket - Send client-generated ticket via email
+// POST /api/payment/send-ticket - Send client-generated ticket via email with Payment ID
 router.post("/send-ticket", async (req, res) => {
   try {
     const { 
@@ -1001,7 +912,7 @@ router.post("/send-ticket", async (req, res) => {
     }
 
     console.log("📧 Sending CLIENT-generated ticket via email");
-    
+
     await sendTicketEmail({
       email,
       name: name || "Guest",
