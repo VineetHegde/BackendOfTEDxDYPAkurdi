@@ -488,7 +488,6 @@
 
 // module.exports = router;
 
-
 const express = require("express");
 const router = express.Router();
 const crypto = require("crypto");
@@ -504,16 +503,18 @@ const { connectDB, withTransaction } = require("./utils/db");
 
 connectDB().catch(err => console.error("MongoDB connection error on startup:", err));
 
-// CRITICAL: Ensure Razorpay secret key is loaded
+// 🔐 SECURE: Get secret key from environment (no hardcoding)
 const RZP_KEY_SECRET = process.env.TEDX_RAZORPAY_KEY_SECRET || "";
 const EVENT_ID = process.env.TEDX_EVENT_ID || "tedx-2025";
 
-// Enhanced secret key validation
+// 🚨 CRITICAL: Enhanced secret key validation
 if (!RZP_KEY_SECRET) {
-  console.error("❌ CRITICAL: TEDX_RAZORPAY_KEY_SECRET not found!");
-  console.error("💡 Set this in your Render dashboard: TEDX_RAZORPAY_KEY_SECRET=5CJyrY6gq2hcbZiOrQ5aLX5N");
+  console.error("❌ CRITICAL: TEDX_RAZORPAY_KEY_SECRET not found in environment!");
+  console.error("💡 Set this in your Render dashboard environment variables:");
+  console.error("   Variable: TEDX_RAZORPAY_KEY_SECRET");
+  console.error("   Value: [Your secret key from Razorpay dashboard]");
 } else {
-  console.log("✅ Razorpay secret key loaded:", `${RZP_KEY_SECRET.slice(0, 8)}...`);
+  console.log("✅ Razorpay secret key loaded successfully");
 }
 
 // Initialize capacity with 400 seats
@@ -531,7 +532,7 @@ const initializeCapacity = async () => {
       });
       console.log("🚀 Initialized capacity document for", EVENT_ID, "with 400 seats");
     } else {
-      console.log("✅ Capacity document exists for", EVENT_ID);
+      console.log("✅ Capacity document already exists for", EVENT_ID);
     }
   } catch (error) {
     console.error("❌ Failed to initialize capacity:", error.message);
@@ -544,6 +545,16 @@ initializeCapacity();
 async function checkSessionAvailability(session) {
   const cap = await EventCapacity.findOne({ eventId: EVENT_ID }).lean();
   
+  console.log("🔍 Checking availability:", {
+    session,
+    eventId: EVENT_ID,
+    capacityFound: !!cap,
+    totalSeats: cap?.totalSeats,
+    fullDay: cap?.fullDay,
+    morningSingles: cap?.morningSingles,
+    eveningSingles: cap?.eveningSingles
+  });
+
   if (!cap) {
     console.log("❌ No capacity document found for eventId:", EVENT_ID);
     return false;
@@ -559,19 +570,20 @@ async function checkSessionAvailability(session) {
   switch (session) {
     case "morning":
       result = morningAvailable > 0;
+      console.log(`Morning session available: ${result} (${morningAvailable} seats)`);
       break;
     case "evening":
       result = eveningAvailable > 0;
+      console.log(`Evening session available: ${result} (${eveningAvailable} seats)`);
       break;
     case "fullDay":
       result = fullDayAvailable > 0;
+      console.log(`Full day session available: ${result} (${fullDayAvailable} seats)`);
       break;
     default:
       console.log("❌ Invalid session type:", session);
       result = false;
   }
-  
-  console.log(`Session ${session} availability:`, result);
   return result;
 }
 
@@ -633,8 +645,9 @@ router.post("/create-order", async (req, res) => {
     if (!Number.isFinite(num) || num <= 0) {
       console.log("❌ Invalid amount:", amount);
       return res.status(400).json({ 
-        error: "Valid amount is required", 
-        received: amount 
+        error: "Valid amount is required",
+        received: amount,
+        expectedType: "positive number"
       });
     }
     
@@ -642,12 +655,12 @@ router.post("/create-order", async (req, res) => {
       console.log("❌ Invalid session:", session);
       return res.status(400).json({ 
         error: "Valid session type is required",
-        validSessions: ["morning", "evening", "fullDay"],
-        received: session
+        received: session,
+        validOptions: ["morning", "evening", "fullDay"]
       });
     }
 
-    // Check availability
+    // Check availability before creating order
     console.log("🔄 Checking seat availability before creating order...");
     const isAvailable = await checkSessionAvailability(session);
     
@@ -661,13 +674,53 @@ router.post("/create-order", async (req, res) => {
 
     console.log("✅ Seats available, creating Razorpay order...");
     
-    // Create order with enhanced metadata
-    const order = await createOrder(num, {
-      session,
-      email,
-      receiptHint: session,
-      ticketIntent: `${session}_ticket`
-    });
+    // Create order with enhanced error handling
+    let order;
+    try {
+      order = await createOrder(num, {
+        session,
+        email,
+        receiptHint: session,
+        ticketIntent: `${session}_ticket`
+      });
+    } catch (createOrderError) {
+      console.error("❌ Order creation failed:", createOrderError.message);
+      
+      // Categorize the error for better debugging
+      if (createOrderError.message.includes('authentication') || 
+          createOrderError.message.includes('Unauthorized') ||
+          createOrderError.message.includes('Invalid key')) {
+        console.error("🚨 AUTHENTICATION ERROR: Razorpay API key issue detected!");
+        console.error("💡 Check if TEDX_RAZORPAY_KEY_SECRET is set correctly in Render");
+        return res.status(401).json({ 
+          error: "Payment gateway authentication failed",
+          details: "Razorpay API authentication error",
+          suggestion: "Check environment variable TEDX_RAZORPAY_KEY_SECRET in Render dashboard"
+        });
+      }
+      
+      if (createOrderError.message.includes('invalid request') || 
+          createOrderError.message.includes('BAD_REQUEST')) {
+        return res.status(400).json({ 
+          error: "Invalid payment request",
+          details: createOrderError.message,
+          suggestion: "Check order parameters (amount, currency, etc.)"
+        });
+      }
+      
+      if (createOrderError.message.includes('network') || 
+          createOrderError.message.includes('timeout') ||
+          createOrderError.message.includes('ENOTFOUND')) {
+        return res.status(503).json({
+          error: "Network connectivity issue",
+          details: "Unable to reach Razorpay servers",
+          suggestion: "Please try again in a moment"
+        });
+      }
+      
+      // Generic error
+      throw createOrderError;
+    }
     
     console.log("✅ Razorpay order created successfully:", {
       orderId: order.id,
@@ -690,36 +743,8 @@ router.post("/create-order", async (req, res) => {
     });
     
   } catch (err) {
-    console.error("❌ Error creating order:", err?.message || err);
-    console.error("Full error:", err);
-    
-    // Enhanced error categorization
-    if (err?.message?.includes('authentication') || 
-        err?.message?.includes('Unauthorized') || 
-        err?.status === 401) {
-      console.error("🚨 RAZORPAY AUTHENTICATION FAILED - Check live keys!");
-      return res.status(401).json({ 
-        error: "Payment gateway authentication failed",
-        details: "Invalid Razorpay credentials. Check your live API keys.",
-        suggestion: "Verify TEDX_RAZORPAY_KEY_SECRET is set correctly"
-      });
-    }
-    
-    if (err?.message?.includes('invalid request') || err?.status === 400) {
-      return res.status(400).json({ 
-        error: "Invalid payment request",
-        details: err?.message || "Request validation failed",
-        suggestion: "Check order amount and parameters"
-      });
-    }
-    
-    if (err?.message?.includes('network') || err?.message?.includes('timeout')) {
-      return res.status(503).json({
-        error: "Network error",
-        details: "Unable to reach Razorpay servers",
-        suggestion: "Please try again in a moment"
-      });
-    }
+    console.error("❌ Unexpected error in create-order:", err?.message || err);
+    console.error("Full error details:", err);
     
     return res.status(500).json({ 
       error: "Failed to create order",
@@ -739,7 +764,7 @@ async function getNextSequenceValue(sequenceName, session = null) {
   return counter.sequence_value;
 }
 
-// POST /api/payment/verify - Enhanced verification
+// POST /api/payment/verify - Enhanced verification with secure error handling
 router.post("/verify", async (req, res) => {
   try {
     const {
@@ -781,15 +806,17 @@ router.post("/verify", async (req, res) => {
       });
     }
 
+    // 🔐 SECURE: Check secret key without exposing it
     if (!RZP_KEY_SECRET) {
       console.error("🚨 RAZORPAY SECRET KEY MISSING IN VERIFY!");
+      console.error("💡 Environment variable TEDX_RAZORPAY_KEY_SECRET not found");
       return res.status(500).json({ 
         success: false, 
-        message: "Payment secret not configured on server"
+        message: "Payment verification not configured - missing secret key"
       });
     }
 
-    // Enhanced signature verification
+    // Enhanced signature verification with secure logging
     console.log("🔐 Verifying payment signature...");
     const expected = crypto.createHmac("sha256", RZP_KEY_SECRET)
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
@@ -797,8 +824,11 @@ router.post("/verify", async (req, res) => {
     
     if (expected !== razorpay_signature) {
       console.error("❌ Payment signature verification failed!");
-      console.error("Expected signature:", expected.slice(0, 10) + "...");
-      console.error("Received signature:", razorpay_signature.slice(0, 10) + "...");
+      // 🔐 SECURE: Don't log actual signatures in production
+      if (process.env.NODE_ENV !== "production") {
+        console.error("Expected signature starts with:", expected.slice(0, 10) + "...");
+        console.error("Received signature starts with:", razorpay_signature.slice(0, 10) + "...");
+      }
       return res.status(400).json({ 
         success: false, 
         message: "Invalid payment signature - payment verification failed"
@@ -1038,7 +1068,7 @@ router.post("/send-ticket", async (req, res) => {
       ticketImage
     });
 
-    // Save PDF backup
+    // Save PDF backup (optional)
     if (pdfBase64) {
       try {
         const ticketsDir = path.join(__dirname, "..", "tickets");
