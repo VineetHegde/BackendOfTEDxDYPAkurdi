@@ -166,6 +166,7 @@ const allowedOrigins = [
   /^https:\/\/.+-saurabhmelgirkars-projects\.vercel\.app$/, // preview URLs
    'https://www.tedxdypakurdi.com',
     'https://tedxdypakurdi.com' ,
+  'https://frontend-of-te-dx-website.vercel.app',
 ];
 
 const app = express();
