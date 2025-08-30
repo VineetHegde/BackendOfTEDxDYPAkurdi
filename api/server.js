@@ -144,7 +144,7 @@
 //   }
 // })();
 
-// module.exports = app;
+
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
@@ -156,55 +156,39 @@ const paymentRoutes = require("./paymentRoutes");
 const PORT = process.env.PORT || 4000;
 const NODE_ENV = process.env.NODE_ENV || "development";
 
-// 🔐 SECURE: Set only the PUBLIC Razorpay Key ID (safe to expose)
-if (!process.env.TEDX_RAZORPAY_KEY_ID) {
-  process.env.TEDX_RAZORPAY_KEY_ID = "rzp_live_RAdCru2UL8q5u1";
-}
-
-// Enhanced allowed origins
+// ENHANCED: More comprehensive allowed origins
 const allowedOrigins = [
   "https://tedx-dyp-akurdi.vercel.app",
   "https://tedxdev.netlify.app",
   "http://localhost:3000",
   "http://localhost:1234", 
   "http://127.0.0.1:1234",
-  "http://localhost:5173",
-  "http://localhost:3001",
-  /^http:\/\/localhost:\d+$/,
-  /^https:\/\/.+-saurabhmelgirkars-projects\.vercel\.app$/,
+  "http://localhost:5173", // Vite default
+  "http://localhost:3001", // Alternative React port
+  /^http:\/\/localhost:\d+$/, // allow any localhost port
+  /^https:\/\/.+-saurabhmelgirkars-projects\.vercel\.app$/, // preview URLs
   'https://www.tedxdypakurdi.com',
   'https://tedxdypakurdi.com',
-  'https://frontend-of-te-dx-website.vercel.app', // Added your current domain
-  /^https:\/\/.*\.vercel\.app$/,
-  /^https:\/\/.*\.netlify\.app$/,
+  // ADDED: Additional patterns for development
+  /^https:\/\/.*\.vercel\.app$/, // Any Vercel app
+  /^https:\/\/.*\.netlify\.app$/, // Any Netlify app
 ];
 
 const app = express();
 const BODY_LIMIT = process.env.BODY_LIMIT || "10mb";
 
-// 🔍 SECURE DEBUGGING: Enhanced startup validation without exposing secrets
+// ENHANCED: Startup validation
 console.log("🚀 Starting TEDx Payment Server...");
-console.log("📋 Environment Configuration:", {
+console.log("📋 Environment:", {
   NODE_ENV,
   PORT,
   BODY_LIMIT,
-  RAZORPAY_KEY_ID: process.env.TEDX_RAZORPAY_KEY_ID ? "✅ Configured" : "❌ Missing",
-  RAZORPAY_KEY_SECRET: process.env.TEDX_RAZORPAY_KEY_SECRET ? "✅ Configured" : "❌ Missing",
-  RAZORPAY_MODE: process.env.TEDX_RAZORPAY_KEY_ID?.startsWith('rzp_live_') ? "🔴 LIVE" : "🧪 TEST",
+  RAZORPAY_CONFIGURED: !!(process.env.TEDX_RAZORPAY_KEY_ID && process.env.TEDX_RAZORPAY_KEY_SECRET),
   GOOGLE_CONFIGURED: !!process.env.TEDX_GOOGLE_CREDENTIALS,
   MONGODB_CONFIGURED: !!process.env.MONGODB_URI,
 });
 
-// 🚨 CRITICAL CHECK: Warn if secret key is missing
-if (!process.env.TEDX_RAZORPAY_KEY_SECRET) {
-  console.error("❌ CRITICAL: TEDX_RAZORPAY_KEY_SECRET not found!");
-  console.error("💡 Set this environment variable in your Render dashboard:");
-  console.error("   Variable: TEDX_RAZORPAY_KEY_SECRET");
-  console.error("   Value: [Your secret key from Razorpay dashboard]");
-  console.error("🔐 NEVER put secret keys in your code or commit them to Git!");
-}
-
-// Request logging middleware
+// ENHANCED: Request logging middleware
 if (NODE_ENV === "development") {
   app.use(morgan("dev"));
 } else {
@@ -215,10 +199,11 @@ if (NODE_ENV === "development") {
 app.use(express.json({ limit: BODY_LIMIT }));
 app.use(express.urlencoded({ limit: BODY_LIMIT, extended: true }));
 
-// Enhanced CORS
+// ENHANCED: CORS with better error handling
 app.use(
   cors({
     origin: (origin, callback) => {
+      // Allow requests with no origin (mobile apps, curl, etc.)
       if (!origin) return callback(null, true);
       
       const ok = allowedOrigins.some((o) =>
@@ -245,21 +230,22 @@ app.use(
   })
 );
 
+// Handle preflight OPTIONS requests
 app.options("*", cors());
 
-// Request tracking middleware
+// ADDED: Request tracking middleware
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
     const duration = Date.now() - start;
-    if (duration > 5000) {
+    if (duration > 5000) { // Log slow requests
       console.warn(`⏱️ Slow request: ${req.method} ${req.path} took ${duration}ms`);
     }
   });
   next();
 });
 
-// Enhanced health check
+// ENHANCED: Health check with detailed status
 app.get("/health", async (req, res) => {
   try {
     const health = {
@@ -275,7 +261,7 @@ app.get("/health", async (req, res) => {
       }
     };
 
-    // Database check
+    // Quick database check
     try {
       const { mongoose } = require("mongoose");
       health.services.database = mongoose.connection.readyState === 1 ? "connected" : "disconnected";
@@ -283,7 +269,7 @@ app.get("/health", async (req, res) => {
       health.services.database = "error";
     }
 
-    // Razorpay config check (secure - no secrets exposed)
+    // Razorpay config check
     health.services.razorpay = (process.env.TEDX_RAZORPAY_KEY_ID && process.env.TEDX_RAZORPAY_KEY_SECRET) 
       ? "configured" 
       : "not_configured";
@@ -309,19 +295,19 @@ app.get("/", (req, res) => {
     message: "TEDx Payment Server is running!",
     version: "2.0.0",
     environment: NODE_ENV,
-    timestamp: new Date().toISOString(),
-    razorpay_status: (process.env.TEDX_RAZORPAY_KEY_ID && process.env.TEDX_RAZORPAY_KEY_SECRET) ? "configured" : "missing"
+    timestamp: new Date().toISOString()
   });
 });
 
-// API routes
+// ENHANCED: API routes with error handling
 app.use("/api/payment", paymentRoutes);
 
-// Enhanced ticket routes
+// ENHANCED: Ticket routes with better error handling
 app.get("/api/tickets/:ticketId", async (req, res) => {
   try {
     const { ticketId } = req.params;
     
+    // Basic validation
     if (!ticketId || ticketId.length < 5) {
       return res.status(400).json({ 
         error: "Invalid ticket ID format" 
@@ -341,7 +327,7 @@ app.get("/api/tickets/:ticketId", async (req, res) => {
 
     console.log(`✅ Ticket retrieved: ${ticketId}`);
     
-    // Return sanitized ticket data
+    // Return sanitized ticket data (don't expose internal fields)
     const sanitizedTicket = {
       ticketId: ticket.ticketId,
       name: ticket.name,
@@ -365,7 +351,7 @@ app.get("/api/tickets/:ticketId", async (req, res) => {
   }
 });
 
-// Debug endpoint (secure - no secrets exposed)
+// ADDED: Environment info endpoint (for debugging in non-production)
 if (NODE_ENV !== "production") {
   app.get("/debug/env", (req, res) => {
     const safeEnv = {
@@ -373,7 +359,7 @@ if (NODE_ENV !== "production") {
       PORT,
       TEDX_EVENT_ID: process.env.TEDX_EVENT_ID,
       MONGODB_URI: process.env.MONGODB_URI ? "[CONFIGURED]" : "[MISSING]",
-      TEDX_RAZORPAY_KEY_ID: process.env.TEDX_RAZORPAY_KEY_ID ? "[CONFIGURED]" : "[MISSING]",
+      TEDX_RAZORPAY_KEY_ID: process.env.TEDX_RAZORPAY_KEY_ID ? `${process.env.TEDX_RAZORPAY_KEY_ID.slice(0, 8)}...` : "[MISSING]",
       TEDX_RAZORPAY_KEY_SECRET: process.env.TEDX_RAZORPAY_KEY_SECRET ? "[CONFIGURED]" : "[MISSING]",
       TEDX_GOOGLE_CREDENTIALS: process.env.TEDX_GOOGLE_CREDENTIALS ? "[CONFIGURED]" : "[MISSING]",
       BODY_LIMIT
@@ -393,11 +379,12 @@ app.use((req, res) => {
   });
 });
 
-// Enhanced global error handler
+// ENHANCED: Global error handler with better logging
 app.use((err, req, res, next) => {
   const timestamp = new Date().toISOString();
   const errorId = Math.random().toString(36).substring(2, 15);
-
+  
+  // Log error details
   console.error(`❌ Error [${errorId}] at ${timestamp}:`, {
     message: err?.message,
     stack: err?.stack,
@@ -407,6 +394,7 @@ app.use((err, req, res, next) => {
     userAgent: req?.headers?.['user-agent']
   });
 
+  // Handle specific error types
   if (err?.type === "entity.too.large") {
     return res.status(413).json({ 
       error: "Payload too large",
@@ -414,7 +402,7 @@ app.use((err, req, res, next) => {
       errorId
     });
   }
-
+  
   if (err instanceof SyntaxError && "body" in err) {
     return res.status(400).json({ 
       error: "Invalid JSON payload",
@@ -423,6 +411,7 @@ app.use((err, req, res, next) => {
     });
   }
 
+  // CORS errors
   if (err?.message?.includes("Not allowed by CORS")) {
     return res.status(403).json({
       error: "CORS policy violation",
@@ -431,6 +420,7 @@ app.use((err, req, res, next) => {
     });
   }
 
+  // Generic error response
   const isDevelopment = NODE_ENV === "development";
   res.status(500).json({
     error: "Internal Server Error",
@@ -441,7 +431,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Google Sheets Auth
+// ENHANCED: Google Sheets Auth with better error handling
 async function verifyGoogleAuth() {
   try {
     console.log("🔐 Verifying Google Sheets authentication...");
@@ -462,7 +452,8 @@ async function verifyGoogleAuth() {
       throw new Error("Missing client_email or private_key in TEDX_GOOGLE_CREDENTIALS");
     }
 
-    creds.private_key = creds.private_key.replace(/\n/g, "\n");
+    // Fix private key newlines
+    creds.private_key = creds.private_key.replace(/\\n/g, "\n");
 
     const auth = new google.auth.JWT({
       email: creds.client_email,
@@ -483,7 +474,7 @@ async function verifyGoogleAuth() {
   }
 }
 
-// 🔍 SECURE Razorpay configuration check
+// ENHANCED: Razorpay configuration check
 async function verifyRazorpayConfig() {
   try {
     console.log("🔐 Verifying Razorpay configuration...");
@@ -501,26 +492,17 @@ async function verifyRazorpayConfig() {
       throw new Error("Invalid Razorpay key format - must start with 'rzp_test_' or 'rzp_live_'");
     }
 
-    console.log(`✅ Razorpay ${keyType} keys configured successfully`);
+    console.log(`✅ Razorpay ${keyType} keys configured`);
     
-    // Test connection
+    // Test connection if we have the utils available
     try {
       const { testConnection } = require("./utils/razorpayUtils");
       await testConnection();
       console.log("✅ Razorpay connection test passed");
     } catch (testErr) {
       console.warn("⚠️ Razorpay connection test failed:", testErr.message);
-      
-      // Provide helpful debugging information
-      if (testErr.message.includes('authentication') || testErr.message.includes('Unauthorized')) {
-        console.error("💡 Possible causes:");
-        console.error("   - Environment variable TEDX_RAZORPAY_KEY_SECRET not set correctly");
-        console.error("   - Live Razorpay account needs KYC/business verification");
-        console.error("   - API keys regenerated but not updated in environment");
-      }
-      
       if (NODE_ENV === "production") {
-        throw testErr;
+        throw testErr; // Fail startup in production if Razorpay is not working
       }
     }
 
@@ -529,15 +511,16 @@ async function verifyRazorpayConfig() {
   } catch (err) {
     console.error("❌ Razorpay configuration failed:", err.message);
     if (NODE_ENV === "production") {
-      throw err;
+      throw err; // Fail startup in production
     }
     return { configured: false, error: err.message };
   }
 }
 
-// Graceful shutdown
+// ENHANCED: Graceful shutdown handling
 process.on('SIGINT', async () => {
   console.log('📴 Received SIGINT, shutting down gracefully...');
+  
   try {
     const { mongoose } = require("mongoose");
     await mongoose.connection.close();
@@ -545,6 +528,7 @@ process.on('SIGINT', async () => {
   } catch (err) {
     console.error('❌ Error closing MongoDB:', err.message);
   }
+  
   process.exit(0);
 });
 
@@ -553,7 +537,7 @@ process.on('SIGTERM', async () => {
   process.exit(0);
 });
 
-// Enhanced server startup
+// ENHANCED: Server startup with comprehensive checks
 (async () => {
   try {
     console.log("🚀 Initializing TEDx Payment Server...");
@@ -577,13 +561,13 @@ process.on('SIGTERM', async () => {
       console.log(`🌐 Server: http://localhost:${PORT}`);
       console.log(`📊 Health: http://localhost:${PORT}/health`);
       console.log(`🔧 Environment: ${NODE_ENV}`);
-      console.log(`💳 Razorpay: ${process.env.TEDX_RAZORPAY_KEY_ID?.startsWith('rzp_live_') ? '🔴 LIVE MODE' : '🧪 TEST MODE'}`);
       
       if (NODE_ENV !== "production") {
         console.log(`🐛 Debug info: http://localhost:${PORT}/debug/env`);
       }
     });
 
+    // Handle server startup errors
     server.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
         console.error(`❌ Port ${PORT} is already in use`);
